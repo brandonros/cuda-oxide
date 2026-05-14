@@ -19,8 +19,16 @@
 //! `cargo oxide build` succeeds. `cargo oxide run` produces `to_bytes()`
 //! that disagrees with the input `[0; 32]`.
 //!
-//! No fix yet — documents cross-crate monomorphization bug in
-//! curve25519_dalek's Scalar entry points.
+//! ## Fix
+//!
+//! See `dalek_from_canonical_bytes_zero_repro` (DALEK-1 L0) for the
+//! full root cause. Both rungs hit the same bug: cuda-oxide's
+//! `[Deref, Field, Index]` projection lowering dropped the Index
+//! step inside `Scalar52::sub`'s `L.0[i]` access (reached via
+//! `Scalar52`'s `impl Index<usize>`, body `&self.0[_index]`), so
+//! `montgomery_reduce`'s final `sub(_, L)` step corrupted the
+//! result. Fixed by emitting `MirArrayElementAddrOp` for Index
+//! projections in rvalue.rs's projection-walk loop.
 //!
 //! ## Build with
 //!

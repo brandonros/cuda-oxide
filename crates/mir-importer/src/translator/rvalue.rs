@@ -755,7 +755,7 @@ pub fn translate_rvalue(
                 let mut result_val = field_addr_op.deref(ctx).get_result(0);
 
                 // Handle additional projections after the first field
-                // e.g., &(*ptr).field1.field2
+                // e.g., &(*ptr).field1.field2, &(*ptr).field[i]
                 if place.projection.len() > 2 {
                     for proj in &place.projection[2..] {
                         match proj {
@@ -795,10 +795,97 @@ pub fn translate_rvalue(
                                 last_inserted = Some(nested_field_addr_op);
                                 result_val = nested_field_addr_op.deref(ctx).get_result(0);
                             }
+                            mir::ProjectionElem::Index(index_local) => {
+                                // `&(*ptr).field[i]` — array element address after a
+                                // chain of field projections. Surfaced from
+                                // `curve25519_dalek`'s `Scalar52` Index<usize> impl
+                                // (`&(self.0[_index])`), whose body is a Place with
+                                // projections [Deref, Field(0), Index(_index)]. Before
+                                // this arm, the loop bailed on Index and the resulting
+                                // pointer lost the array-element offset entirely,
+                                // making every access return element 0.
+                                let index_place = mir::Place {
+                                    local: *index_local,
+                                    projection: vec![],
+                                };
+                                let (index_value, prev_after_idx) = translate_place(
+                                    ctx,
+                                    body,
+                                    &index_place,
+                                    value_map,
+                                    block_ptr,
+                                    last_inserted,
+                                    loc.clone(),
+                                )?;
+                                last_inserted = prev_after_idx;
+
+                                // result_val must be `*[T; N]` at this point — pull
+                                // out the element type.
+                                let cur_ty = result_val.get_type(ctx);
+                                let element_ty = {
+                                    let cur_ty_ref = cur_ty.deref(ctx);
+                                    let ptr_ty = match cur_ty_ref
+                                        .downcast_ref::<dialect_mir::types::MirPtrType>()
+                                    {
+                                        Some(p) => p,
+                                        None => {
+                                            return input_err!(
+                                                loc.clone(),
+                                                TranslationErr::unsupported(format!(
+                                                    "Index projection after Field expected pointer, got {}",
+                                                    cur_ty.disp(ctx)
+                                                ))
+                                            );
+                                        }
+                                    };
+                                    let pointee = ptr_ty.pointee;
+                                    let pointee_ref = pointee.deref(ctx);
+                                    match pointee_ref
+                                        .downcast_ref::<dialect_mir::types::MirArrayType>()
+                                    {
+                                        Some(arr_ty) => arr_ty.element_type(),
+                                        None => {
+                                            return input_err!(
+                                                loc.clone(),
+                                                TranslationErr::unsupported(format!(
+                                                    "Index projection after Field expected pointer-to-array, got pointer-to {}",
+                                                    pointee.disp(ctx)
+                                                ))
+                                            );
+                                        }
+                                    }
+                                };
+
+                                let elem_ptr_ty = dialect_mir::types::MirPtrType::get_generic(
+                                    ctx,
+                                    element_ty,
+                                    is_mutable,
+                                );
+
+                                use dialect_mir::ops::MirArrayElementAddrOp;
+                                let elem_addr_op = Operation::new(
+                                    ctx,
+                                    MirArrayElementAddrOp::get_concrete_op_info(),
+                                    vec![elem_ptr_ty.into()],
+                                    vec![result_val, index_value],
+                                    vec![],
+                                    0,
+                                );
+                                elem_addr_op.deref_mut(ctx).set_loc(loc.clone());
+
+                                if let Some(prev) = last_inserted {
+                                    elem_addr_op.insert_after(ctx, prev);
+                                }
+                                last_inserted = Some(elem_addr_op);
+                                result_val = elem_addr_op.deref(ctx).get_result(0);
+                            }
                             _ => {
-                                // For other projections (Index, etc.), fall through to general case
-                                // This is a simplification - complex paths like &(*ptr).field[i]
-                                // would need more handling
+                                // ConstantIndex, Downcast, Subslice are not yet
+                                // handled in the &(*ptr).field... chain; fall out
+                                // and let the caller see the partially-walked
+                                // pointer. (Pre-Index fix this also dropped Index,
+                                // which silently corrupted reads — see the Index
+                                // arm above for the surfaced case.)
                                 break;
                             }
                         }
@@ -1005,37 +1092,116 @@ pub fn translate_rvalue(
 
                 if place.projection.len() > 2 {
                     for proj in &place.projection[2..] {
-                        if let mir::ProjectionElem::Field(nested_field_idx, nested_field_ty) = proj
-                        {
-                            let nested_field_type =
-                                super::types::translate_type(ctx, nested_field_ty)?;
-                            let nested_ptr_ty = dialect_mir::types::MirPtrType::get_generic(
-                                ctx,
-                                nested_field_type,
-                                is_mutable,
-                            );
-                            let nested_field_addr_op = Operation::new(
-                                ctx,
-                                MirFieldAddrOp::get_concrete_op_info(),
-                                vec![nested_ptr_ty.into()],
-                                vec![result_val],
-                                vec![],
-                                0,
-                            );
-                            nested_field_addr_op.deref_mut(ctx).set_loc(loc.clone());
-                            let mir_nested_op = MirFieldAddrOp::new(nested_field_addr_op);
-                            mir_nested_op.set_attr_field_index(
-                                ctx,
-                                dialect_mir::attributes::FieldIndexAttr(*nested_field_idx as u32),
-                            );
+                        match proj {
+                            mir::ProjectionElem::Field(nested_field_idx, nested_field_ty) => {
+                                let nested_field_type =
+                                    super::types::translate_type(ctx, nested_field_ty)?;
+                                let nested_ptr_ty = dialect_mir::types::MirPtrType::get_generic(
+                                    ctx,
+                                    nested_field_type,
+                                    is_mutable,
+                                );
+                                let nested_field_addr_op = Operation::new(
+                                    ctx,
+                                    MirFieldAddrOp::get_concrete_op_info(),
+                                    vec![nested_ptr_ty.into()],
+                                    vec![result_val],
+                                    vec![],
+                                    0,
+                                );
+                                nested_field_addr_op.deref_mut(ctx).set_loc(loc.clone());
+                                let mir_nested_op = MirFieldAddrOp::new(nested_field_addr_op);
+                                mir_nested_op.set_attr_field_index(
+                                    ctx,
+                                    dialect_mir::attributes::FieldIndexAttr(
+                                        *nested_field_idx as u32,
+                                    ),
+                                );
 
-                            if let Some(prev) = last_inserted {
-                                nested_field_addr_op.insert_after(ctx, prev);
+                                if let Some(prev) = last_inserted {
+                                    nested_field_addr_op.insert_after(ctx, prev);
+                                }
+                                last_inserted = Some(nested_field_addr_op);
+                                result_val = nested_field_addr_op.deref(ctx).get_result(0);
                             }
-                            last_inserted = Some(nested_field_addr_op);
-                            result_val = nested_field_addr_op.deref(ctx).get_result(0);
-                        } else {
-                            break;
+                            mir::ProjectionElem::Index(index_local) => {
+                                // Raw-pointer sibling of the &-ref Index arm above.
+                                // Same Place shape `[Deref, Field, Index]` surfaces
+                                // here whenever `&raw {const,mut} (*ptr).field[i]`
+                                // is taken.
+                                let index_place = mir::Place {
+                                    local: *index_local,
+                                    projection: vec![],
+                                };
+                                let (index_value, prev_after_idx) = translate_place(
+                                    ctx,
+                                    body,
+                                    &index_place,
+                                    value_map,
+                                    block_ptr,
+                                    last_inserted,
+                                    loc.clone(),
+                                )?;
+                                last_inserted = prev_after_idx;
+
+                                let cur_ty = result_val.get_type(ctx);
+                                let element_ty = {
+                                    let cur_ty_ref = cur_ty.deref(ctx);
+                                    let ptr_ty = match cur_ty_ref
+                                        .downcast_ref::<dialect_mir::types::MirPtrType>()
+                                    {
+                                        Some(p) => p,
+                                        None => {
+                                            return input_err!(
+                                                loc.clone(),
+                                                TranslationErr::unsupported(format!(
+                                                    "Index projection after Field expected pointer, got {}",
+                                                    cur_ty.disp(ctx)
+                                                ))
+                                            );
+                                        }
+                                    };
+                                    let pointee = ptr_ty.pointee;
+                                    let pointee_ref = pointee.deref(ctx);
+                                    match pointee_ref
+                                        .downcast_ref::<dialect_mir::types::MirArrayType>()
+                                    {
+                                        Some(arr_ty) => arr_ty.element_type(),
+                                        None => {
+                                            return input_err!(
+                                                loc.clone(),
+                                                TranslationErr::unsupported(format!(
+                                                    "Index projection after Field expected pointer-to-array, got pointer-to {}",
+                                                    pointee.disp(ctx)
+                                                ))
+                                            );
+                                        }
+                                    }
+                                };
+
+                                let elem_ptr_ty = dialect_mir::types::MirPtrType::get_generic(
+                                    ctx,
+                                    element_ty,
+                                    is_mutable,
+                                );
+
+                                use dialect_mir::ops::MirArrayElementAddrOp;
+                                let elem_addr_op = Operation::new(
+                                    ctx,
+                                    MirArrayElementAddrOp::get_concrete_op_info(),
+                                    vec![elem_ptr_ty.into()],
+                                    vec![result_val, index_value],
+                                    vec![],
+                                    0,
+                                );
+                                elem_addr_op.deref_mut(ctx).set_loc(loc.clone());
+                                if let Some(prev) = last_inserted {
+                                    elem_addr_op.insert_after(ctx, prev);
+                                }
+                                last_inserted = Some(elem_addr_op);
+                                result_val = elem_addr_op.deref(ctx).get_result(0);
+                            }
+                            _ => break,
                         }
                     }
                 }

@@ -21,17 +21,30 @@
 //! unexpectedly, or the PartialEq comparison returned false despite
 //! both operands being zero.
 //!
-//! ## What's suspected
+//! ## Root cause
 //!
-//! Cross-crate monomorphization of dalek's `Scalar::from_canonical_bytes`
-//! and/or `PartialEq for Scalar`. The Scalar52 layer ported in-tree
-//! passes; the real crate's wrapper around it does not. Possible
-//! triggers: `subtle::Choice`/`CtOption` codegen for the validation
-//! branch, or a generic-param instantiation difference reading the
-//! static `Scalar::ZERO` constant across crates.
+//! `[crates/mir-importer/src/translator/rvalue.rs]` lowered the Place
+//! projection chain `[Deref, Field, Index]` (taken from `&self.0[i]`
+//! inside `Scalar52`'s `impl Index<usize>`) by walking Deref + Field
+//! and then **silently dropping** the Index step — the resulting
+//! pointer was `&array[0]` instead of `&array[i]`. Every iteration of
+//! the `for i in 0..5 { ... L.0[i] ... }` loop inside `Scalar52::sub`
+//! therefore re-loaded `L.0[0]`, so `sub(intermediate, L)` (the final
+//! canonicalization step in `montgomery_reduce`) returned garbage,
+//! `Scalar::reduce(zero) != zero`, `is_canonical(zero) == Choice(0)`,
+//! and the validation branch of `from_canonical_bytes` returned None.
 //!
-//! No fix yet — documents cross-crate monomorphization bug in
-//! curve25519_dalek's Scalar entry points.
+//! The passing twin (`dalek_scalar52_reduce_pipeline_zero_repro`)
+//! uses explicit `L.0[i]` (projection chain `[Field, Index]`, no Deref)
+//! and went through a different lowering path that handled the Index,
+//! which is why the byte-identical algorithm passed in-tree.
+//!
+//! ## Fix
+//!
+//! Added an `Index` arm to the projection-walking loop in rvalue.rs
+//! (both the `Rvalue::Ref` and `Rvalue::RawPtr` sites): emit a
+//! `MirArrayElementAddrOp` so the resulting pointer is offset to the
+//! correct array element.
 //!
 //! ## Build with
 //!

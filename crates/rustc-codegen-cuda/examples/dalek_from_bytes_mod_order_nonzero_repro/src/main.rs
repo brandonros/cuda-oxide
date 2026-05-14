@@ -15,8 +15,12 @@
 //! `cargo oxide build` succeeds. `cargo oxide run` produces `to_bytes()`
 //! that disagrees with the input.
 //!
-//! No fix yet — documents cross-crate monomorphization bug in
-//! curve25519_dalek's Scalar entry points.
+//! ## Fix
+//!
+//! See `dalek_from_canonical_bytes_zero_repro` (DALEK-1 L0) for the
+//! full root cause. Same `Deref→Field→Index` projection-lowering bug
+//! inside `Scalar52::sub`'s `L.0[i]` access; nonzero input goes
+//! through the same Montgomery-reduce path.
 //!
 //! ## Build with
 //!
