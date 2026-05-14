@@ -235,6 +235,7 @@ regressed a previously-fixed bug — bisect the codegen crates.
 * slice_const_indexing
 * slice_last_from_end
 * slice_range
+* slice_reverse_partial
 * static_ref_relocation
 * static_u64_array_load
 * str_panic_path

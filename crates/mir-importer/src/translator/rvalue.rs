@@ -3605,7 +3605,155 @@ fn translate_place_addr_from_slot(
     let mut current = slot;
     let mut current_prev_op = prev_op;
 
-    for elem in projection {
+    let mut proj_i = 0usize;
+    while proj_i < projection.len() {
+        let elem = &projection[proj_i];
+
+        // Peek-ahead for `[Deref-on-slice, Index|ConstantIndex(false)]`:
+        // when the current pointer's pointee is a slice (fat pointer)
+        // and the next projection is a single-element index, handle
+        // both atomically — load the fat pointer, extract field 0
+        // (data pointer), then `mir.ptr_offset` to the element address.
+        // This is what `&mut s[0]` on `s: &mut [u8]` (the revswap
+        // element-pointer construction inside inlined slice
+        // `.reverse()`) needs; without it, Case 5's `MirRefOp` wrapper
+        // alloca-and-stores the loaded element value and returns the
+        // slot's address — so subsequent writes through the returned
+        // pointer hit a local copy instead of the slice element. See
+        // `examples/slice_reverse_partial`.
+        if let mir::ProjectionElem::Deref = elem {
+            let pointee_ty = current
+                .get_type(ctx)
+                .deref(ctx)
+                .downcast_ref::<dialect_mir::types::MirPtrType>()
+                .map(|mp| mp.pointee);
+            let slice_element_ty = pointee_ty.and_then(|p| {
+                p.deref(ctx)
+                    .downcast_ref::<dialect_mir::types::MirSliceType>()
+                    .map(|st| st.element_type())
+            });
+
+            if let (Some(slice_element_ty), Some(fat_ptr_ty), Some(next)) = (
+                slice_element_ty,
+                pointee_ty,
+                projection.get(proj_i + 1),
+            ) {
+                use dialect_mir::ops::{MirExtractFieldOp, MirLoadOp, MirPtrOffsetOp};
+
+                // Determine the index value from the next projection
+                // BEFORE inserting any ops. If the next is something
+                // we don't know how to index a slice with, bail.
+                enum SliceIndex {
+                    ConstantIndex(i64),
+                    Index(mir::Local),
+                }
+                let slice_idx = match next {
+                    mir::ProjectionElem::ConstantIndex {
+                        offset,
+                        from_end: false,
+                        ..
+                    } => SliceIndex::ConstantIndex(*offset as i64),
+                    mir::ProjectionElem::Index(local) => SliceIndex::Index(*local),
+                    _ => return Ok(None),
+                };
+
+                // Load the fat pointer.
+                let load = Operation::new(
+                    ctx,
+                    MirLoadOp::get_concrete_op_info(),
+                    vec![fat_ptr_ty],
+                    vec![current],
+                    vec![],
+                    0,
+                );
+                load.deref_mut(ctx).set_loc(loc.clone());
+                match current_prev_op {
+                    Some(p) => load.insert_after(ctx, p),
+                    None => load.insert_at_front(block_ptr, ctx),
+                }
+                let slice_val = load.deref(ctx).get_result(0);
+                current_prev_op = Some(load);
+
+                // Extract field 0 — the data pointer.
+                let data_ptr_ty: Ptr<TypeObj> =
+                    dialect_mir::types::MirPtrType::get_generic(ctx, slice_element_ty, false)
+                        .into();
+                let extract = Operation::new(
+                    ctx,
+                    MirExtractFieldOp::get_concrete_op_info(),
+                    vec![data_ptr_ty],
+                    vec![slice_val],
+                    vec![],
+                    0,
+                );
+                extract.deref_mut(ctx).set_loc(loc.clone());
+                MirExtractFieldOp::new(extract)
+                    .set_attr_index(ctx, dialect_mir::attributes::FieldIndexAttr(0));
+                if let Some(p) = current_prev_op {
+                    extract.insert_after(ctx, p);
+                }
+                let data_ptr = extract.deref(ctx).get_result(0);
+                current_prev_op = Some(extract);
+
+                // Get the index value.
+                let index_val = match slice_idx {
+                    SliceIndex::ConstantIndex(offset) => {
+                        let i64_ty = IntegerType::get(ctx, 64, Signedness::Signed);
+                        let apint = APInt::from_i64(offset, NonZeroUsize::new(64).unwrap());
+                        let attr =
+                            pliron::builtin::attributes::IntegerAttr::new(i64_ty, apint);
+                        let cop = Operation::new(
+                            ctx,
+                            MirConstantOp::get_concrete_op_info(),
+                            vec![i64_ty.into()],
+                            vec![],
+                            vec![],
+                            0,
+                        );
+                        cop.deref_mut(ctx).set_loc(loc.clone());
+                        MirConstantOp::new(cop).set_attr_value(ctx, attr);
+                        if let Some(p) = current_prev_op {
+                            cop.insert_after(ctx, p);
+                        }
+                        current_prev_op = Some(cop);
+                        cop.deref(ctx).get_result(0)
+                    }
+                    SliceIndex::Index(idx_local) => {
+                        let (load_idx, val) = match value_map.load_local(
+                            ctx,
+                            idx_local,
+                            block_ptr,
+                            current_prev_op,
+                        ) {
+                            Some(pair) => pair,
+                            None => return Ok(None),
+                        };
+                        current_prev_op = Some(load_idx);
+                        val
+                    }
+                };
+
+                // `mir.ptr_offset(data_ptr, index)` → pointer to element.
+                let offset_op = Operation::new(
+                    ctx,
+                    MirPtrOffsetOp::get_concrete_op_info(),
+                    vec![data_ptr_ty],
+                    vec![data_ptr, index_val],
+                    vec![],
+                    0,
+                );
+                offset_op.deref_mut(ctx).set_loc(loc.clone());
+                if let Some(p) = current_prev_op {
+                    offset_op.insert_after(ctx, p);
+                }
+                current = offset_op.deref(ctx).get_result(0);
+                current_prev_op = Some(offset_op);
+
+                proj_i += 2; // consumed Deref + (ConstantIndex|Index)
+                continue;
+            }
+        }
+
         match elem {
             mir::ProjectionElem::Field(field_idx, field_ty) => {
                 let field_type = types::translate_type(ctx, field_ty)?;
@@ -3798,6 +3946,7 @@ fn translate_place_addr_from_slot(
             // it in `MirRefOp`.
             _ => return Ok(None),
         }
+        proj_i += 1;
     }
 
     Ok(Some((current, current_prev_op)))
