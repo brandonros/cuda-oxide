@@ -1,0 +1,23 @@
+[package]
+name = "misaligned_struct_field_array_eq_repro"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[workspace]
+
+# Minimal repro for CUDA_ERROR_MISALIGNED_ADDRESS surfaced by
+# vanity-miner-rs self-test slot 13 (ethereum priv).
+#
+# The repro is `(struct.array_field == ARRAY_LITERAL) as u32` where the
+# struct's alignment is 1 (Rust default repr with a leading u8/bool +
+# `[u8; 32]` field reordered to offset 1). The optimizer vectorizes the
+# 32-byte equality compare to two `ld.local.v2.b64` instructions, each
+# 16 bytes wide. PTX wide loads need natural 16-byte alignment of the
+# effective address; reading the [u8; 32] field at struct base + 1 is
+# 1-aligned, so the kernel takes a misaligned-address fault on hardware.
+
+[dependencies]
+cuda-device = { path = "../../../cuda-device" }
+cuda-host = { path = "../../../cuda-host" }
+cuda-core = { path = "../../../cuda-core" }

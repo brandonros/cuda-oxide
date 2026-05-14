@@ -907,11 +907,20 @@ fn convert_rust_raw_eq(
         })?;
     let int_ty = IntegerType::get(ctx, bits, Signedness::Signless);
 
-    let a_load = llvm::LoadOp::new(ctx, a_ptr, int_ty.into());
+    // Pointee alignment caps the wide load. Without this, NVPTX picks
+    // its lowering off the *result* type's ABI alignment — for i256
+    // that's enough to emit `ld.local.v2.b64`, which hard-faults when
+    // the pointer is actually only 1-aligned (e.g. a `[u8; 32]` field
+    // at struct offset +1, as seen in vanity-miner-rs's
+    // `EthereumVanityKeyResult::private_key`). Explicit `, align N`
+    // forces NVPTX to use a lowering that respects the real alignment.
+    let pointee_align = super::super::types::get_type_alignment(ctx, llvm_pointee);
+
+    let a_load = llvm::LoadOp::new_with_alignment(ctx, a_ptr, int_ty.into(), pointee_align);
     rewriter.insert_operation(ctx, a_load.get_operation());
     let a_val = a_load.get_operation().deref(ctx).get_result(0);
 
-    let b_load = llvm::LoadOp::new(ctx, b_ptr, int_ty.into());
+    let b_load = llvm::LoadOp::new_with_alignment(ctx, b_ptr, int_ty.into(), pointee_align);
     rewriter.insert_operation(ctx, b_load.get_operation());
     let b_val = b_load.get_operation().deref(ctx).get_result(0);
 

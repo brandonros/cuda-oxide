@@ -1619,6 +1619,18 @@ impl<'a> ModuleExportState<'a> {
                     write!(output, ", ptr ").unwrap();
                 }
                 self.export_value(ptr, value_names, output)?;
+                // Append `, align N` when the load was constructed with an
+                // explicit alignment. Without this NVPTX falls back to the
+                // result type's ABI alignment, which for large integer types
+                // like i256 trips wide-vector lowering against pointers
+                // whose actual alignment is smaller (e.g. `[u8; 32]` field
+                // at struct offset +1, which is 1-aligned but llvm thinks
+                // i256 is at least 16-aligned).
+                if let Some(load_obj) = op_obj.as_ref().downcast_ref::<ops::LoadOp>()
+                    && let Some(align) = load_obj.get_alignment(self.ctx)
+                {
+                    write!(output, ", align {align}").unwrap();
+                }
                 writeln!(output).unwrap();
             }
             id if id == ops::StoreOp::get_opid_static() => {

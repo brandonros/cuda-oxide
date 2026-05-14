@@ -438,6 +438,64 @@ pub(crate) fn get_type_size(ctx: &Context, ty: Ptr<TypeObj>) -> u64 {
     8
 }
 
+/// Conservative lower bound on the natural alignment of an LLVM value
+/// type, in bytes. Returns the alignment that a pointer of this type is
+/// *guaranteed* to satisfy — never claims more.
+///
+/// Used by raw_eq lowering (and any other site that needs to pick a safe
+/// `, align N` for a load whose pointee alignment is smaller than the
+/// load's result type's ABI default) to set an explicit alignment on the
+/// emitted `llvm.load`. Without that override NVPTX picks wide-vector
+/// lowerings (`ld.local.v2.b64`) based on the *result type's* ABI
+/// alignment, which is much larger than what `[u8; N]` actually
+/// guarantees — and faults on hardware as soon as the source happens
+/// to land at an odd address (e.g. a `[u8; 32]` field at struct
+/// offset +1).
+pub(crate) fn get_type_alignment(ctx: &Context, ty: Ptr<TypeObj>) -> u64 {
+    let ty_ref = ty.deref(ctx);
+
+    // Integers: width-rounded-up to bytes, capped at 8 (i128/i256 still
+    // have natural 1-byte element alignment at the source level — the
+    // bigger numbers come from ABI rules we don't model).
+    if let Some(int_ty) = ty_ref.downcast_ref::<IntegerType>() {
+        return std::cmp::min(8, std::cmp::max(1, (int_ty.width() as u64).div_ceil(8)));
+    }
+
+    if ty_ref.is::<llvm_types::HalfType>() {
+        return 2;
+    }
+    if ty_ref.is::<FP32Type>() {
+        return 4;
+    }
+    if ty_ref.is::<FP64Type>() {
+        return 8;
+    }
+    if ty_ref.is::<llvm_types::PointerType>() {
+        return 8;
+    }
+
+    // Arrays inherit the element alignment ([u8; 32] is align 1, [u64; 4]
+    // is align 8).
+    if let Some(arr_ty) = ty_ref.downcast_ref::<llvm_types::ArrayType>() {
+        return get_type_alignment(ctx, arr_ty.elem_type());
+    }
+
+    // Structs: max of field alignments. Doesn't model `#[repr(packed)]`
+    // explicitly but the importer represents packed structs with all-
+    // byte fields, which collapse to align 1 here anyway.
+    if let Some(struct_ty) = ty_ref.downcast_ref::<llvm_types::StructType>() {
+        return struct_ty
+            .fields()
+            .map(|f| get_type_alignment(ctx, f))
+            .max()
+            .unwrap_or(1);
+    }
+
+    // Unknown: claim 1 — callers that emit `, align 1` always stay
+    // correct; over-promising can fault.
+    1
+}
+
 /// Create the LLVM struct type used for slice representations.
 ///
 /// Slices are represented as fat pointers: `{ ptr, i64 }` where:

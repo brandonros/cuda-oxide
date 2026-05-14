@@ -168,12 +168,26 @@ pub enum LoadOpVerifyErr {
 #[pliron_op(
     name = "llvm.load",
     format = "$0 ` : ` type($0)",
-    interfaces = [NResultsInterface<1>, OneResultInterface, NOpdsInterface<1>, OneOpdInterface]
+    interfaces = [NResultsInterface<1>, OneResultInterface, NOpdsInterface<1>, OneOpdInterface],
+    attributes = (
+        // Optional explicit alignment for the load. When absent, the
+        // exporter omits the `, align N` suffix and LLVM falls back to
+        // the result type's ABI alignment — which on NVPTX picks
+        // wide-vector lowerings (`ld.local.v2.b64`) for large integer
+        // types like i256. Callers that load through a pointer whose
+        // alignment is provably smaller than that ABI default must set
+        // this attribute to the actual alignment to avoid the wide
+        // lowering hard-faulting on misaligned addresses.
+        //
+        // Named distinctly from GlobalOp's `llvm_alignment` because
+        // pliron treats attribute names as a global dictionary.
+        llvm_load_alignment: crate::attributes::AlignmentAttr
+    )
 )]
 pub struct LoadOp;
 
 impl LoadOp {
-    /// Create a new [`LoadOp`].
+    /// Create a new [`LoadOp`] without an explicit alignment.
     pub fn new(ctx: &mut Context, ptr: Value, res_ty: Ptr<TypeObj>) -> Self {
         LoadOp {
             op: Operation::new(
@@ -185,6 +199,35 @@ impl LoadOp {
                 0,
             ),
         }
+    }
+
+    /// Create a new [`LoadOp`] with an explicit alignment in bytes.
+    pub fn new_with_alignment(
+        ctx: &mut Context,
+        ptr: Value,
+        res_ty: Ptr<TypeObj>,
+        alignment: u64,
+    ) -> Self {
+        let op = Self::new(ctx, ptr, res_ty);
+        op.set_alignment(ctx, alignment);
+        op
+    }
+
+    /// Get the explicit alignment, in bytes. Returns `None` when the
+    /// load was constructed without one (the exporter then omits
+    /// `, align N` and LLVM uses the result type's ABI default).
+    #[must_use]
+    pub fn get_alignment(&self, ctx: &Context) -> Option<u64> {
+        self.get_attr_llvm_load_alignment(ctx)
+            .map(|attr| attr.0 as u64)
+    }
+
+    /// Set the explicit alignment, in bytes.
+    pub fn set_alignment(&self, ctx: &mut Context, alignment: u64) {
+        self.set_attr_llvm_load_alignment(
+            ctx,
+            crate::attributes::AlignmentAttr(alignment as u32),
+        );
     }
 }
 
