@@ -1,0 +1,20 @@
+[package]
+name = "slice_reverse_partial"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[workspace]
+
+# Bug-41 narrowed: vanity-miner-rs slot 108 FAILed in v1.53.0 —
+# `<[u8]>::reverse()` on a partial sub-slice of a stack array.
+# `base58_encode_32` calls `output[..result_len].reverse()` after
+# the digit-extraction + alphabet-map. Slot 107 (hand-rolled
+# reverse) PASSes; the std `<[u8]>::reverse()` variant FAILs.
+#
+# Build with:
+#   cargo oxide build slice_reverse_partial
+[dependencies]
+cuda-device = { path = "../../../cuda-device" }
+cuda-host = { path = "../../../cuda-host" }
+cuda-core = { path = "../../../cuda-core" }
