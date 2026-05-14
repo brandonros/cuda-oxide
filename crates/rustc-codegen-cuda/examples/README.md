@@ -219,22 +219,28 @@ made `Tag::from_u8` return `Err` and `.expect()` panic the kernel.
 | L4   | `k256_uncompressed_pubkey_derive_repro`        | 5   | full uncompressed derive (eth pipeline upstream) | **PASS** (same fix) |
 | twin | `k256_encoded_point_replica_repro`             | 100 | passing baseline: hand-rolled `[u8; 33]` assembly, no k256 | PASS |
 
-**DALEK-1 ladder** — `Scalar` byte entry points / `mul_base`. **L0–L2
-fixed** by the `[Deref, Field, Index]` projection-lowering fix in
-`crates/mir-importer/src/translator/rvalue.rs` (Index step was being
-silently dropped when walking projections after Deref+Field, so
-`L.0[i]` inside `Scalar52::sub`'s `impl Index<usize>` always read
-`L.0[0]`). L3/L4 still FAIL — they're a separate bug downstream of
-`Scalar::reduce` (somewhere in `EdwardsPoint::mul_base` /
-`compress()`).
+**DALEK-1 ladder** — `Scalar` byte entry points / `mul_base`. **Entire
+ladder L0–L4 fixed** in two passes of the same `[Deref, Field, …]`
+projection-lowering bug class:
+* L0–L2: the runtime-index variant `[Deref, Field, Index]` (Index step
+  dropped; `L.0[i]` inside `Scalar52::sub`'s `impl Index<usize>` always
+  read `L.0[0]`).
+* L3–L4: the compile-time-index variant `[Deref, Field, ConstantIndex]`
+  (after unrolling `for i in 0..5 { self.0[i] ^= ... }` in
+  `FieldElement51::conditional_assign`, each `self.0[N] ^= …` carried a
+  `ConstantIndex { offset: N }` projection that the same loop dropped via
+  `_ => break`).
+Both fixes live in `crates/mir-importer/src/translator/rvalue.rs` —
+search for "Index projection after Field" and "ConstantIndex projection
+after Field".
 
 | Rung | Repro example                                  | Self-test slot | What it isolates | Status |
 |------|------------------------------------------------|---------------:|------------------|--------|
 | L0   | `dalek_from_canonical_bytes_zero_repro`        | 112 | no reduce(): just validate + wrap + PartialEq | **PASS** (Deref-Field-Index fix) |
 | L1   | `dalek_from_bytes_mod_order_zero_repro`        | 102 | + reduce() on zero input | **PASS** (same fix) |
 | L2   | `dalek_from_bytes_mod_order_nonzero_repro`     | 71  | + reduce() on non-zero input | **PASS** (same fix) |
-| L3   | `dalek_edwards_mul_base_one_repro`             | 72  | + EdwardsPoint::mul_base + compress() | FAIL (second bug) |
-| L4   | `dalek_ed25519_derive_repro`                   | 2   | full ed25519 derive (solana pipeline upstream) | FAIL (downstream of L3) |
+| L3   | `dalek_edwards_mul_base_one_repro`             | 72  | + EdwardsPoint::mul_base + compress() | **PASS** (Deref-Field-ConstantIndex fix) |
+| L4   | `dalek_ed25519_derive_repro`                   | 2   | full ed25519 derive (solana pipeline upstream) | **PASS** (same fix) |
 | twin | `dalek_scalar52_reduce_pipeline_zero_repro`    | 117 | passing baseline: verbatim Scalar52 reduce port, no dalek | PASS |
 
 Pipeline slots [11]/[12] (solana) and [13]–[20] (ethereum / bitcoin)

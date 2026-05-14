@@ -879,13 +879,118 @@ pub fn translate_rvalue(
                                 last_inserted = Some(elem_addr_op);
                                 result_val = elem_addr_op.deref(ctx).get_result(0);
                             }
+                            mir::ProjectionElem::ConstantIndex {
+                                offset,
+                                min_length: _,
+                                from_end,
+                            } => {
+                                // `&(*ptr).field[N]` — compile-time-known offset
+                                // into the array. Surfaced from
+                                // `FieldElement51::conditional_assign`'s unrolled
+                                // `for i in 0..5 { self.0[i] ^= ... }` loop:
+                                // after unrolling each `i` is a constant, so the
+                                // MIR projection becomes
+                                // [Deref, Field(0), ConstantIndex { offset: N }].
+                                // Before this arm the loop dropped the
+                                // ConstantIndex via the `_ => break` catch-all,
+                                // so every iteration of the unrolled loop wrote
+                                // to `self.0[0]` instead of `self.0[N]`.
+                                if *from_end {
+                                    return input_err!(
+                                        loc.clone(),
+                                        TranslationErr::unsupported(
+                                            "ConstantIndex with from_end=true after Deref+Field not yet supported"
+                                        )
+                                    );
+                                }
+                                let const_idx = *offset as usize;
+
+                                // Same type-extraction as the Index arm — pull
+                                // element type out of *[T; N].
+                                let cur_ty = result_val.get_type(ctx);
+                                let element_ty = {
+                                    let cur_ty_ref = cur_ty.deref(ctx);
+                                    let ptr_ty = match cur_ty_ref
+                                        .downcast_ref::<dialect_mir::types::MirPtrType>()
+                                    {
+                                        Some(p) => p,
+                                        None => {
+                                            return input_err!(
+                                                loc.clone(),
+                                                TranslationErr::unsupported(format!(
+                                                    "ConstantIndex projection after Field expected pointer, got {}",
+                                                    cur_ty.disp(ctx)
+                                                ))
+                                            );
+                                        }
+                                    };
+                                    let pointee = ptr_ty.pointee;
+                                    let pointee_ref = pointee.deref(ctx);
+                                    match pointee_ref
+                                        .downcast_ref::<dialect_mir::types::MirArrayType>()
+                                    {
+                                        Some(arr_ty) => arr_ty.element_type(),
+                                        None => {
+                                            return input_err!(
+                                                loc.clone(),
+                                                TranslationErr::unsupported(format!(
+                                                    "ConstantIndex projection after Field expected pointer-to-array, got pointer-to {}",
+                                                    pointee.disp(ctx)
+                                                ))
+                                            );
+                                        }
+                                    }
+                                };
+
+                                // Materialise the constant index as an i64
+                                // SSA value (MirArrayElementAddrOp takes a
+                                // dynamic operand for the index).
+                                use dialect_mir::ops::{MirArrayElementAddrOp, MirConstantOp};
+                                use pliron::builtin::attributes::IntegerAttr;
+                                let i64_ty = IntegerType::get(ctx, 64, Signedness::Signed);
+                                let index_apint =
+                                    APInt::from_i64(const_idx as i64, NonZeroUsize::new(64).unwrap());
+                                let index_attr = IntegerAttr::new(i64_ty, index_apint);
+                                let const_op_ptr = Operation::new(
+                                    ctx,
+                                    MirConstantOp::get_concrete_op_info(),
+                                    vec![i64_ty.into()],
+                                    vec![],
+                                    vec![],
+                                    0,
+                                );
+                                const_op_ptr.deref_mut(ctx).set_loc(loc.clone());
+                                MirConstantOp::new(const_op_ptr).set_attr_value(ctx, index_attr);
+                                if let Some(prev) = last_inserted {
+                                    const_op_ptr.insert_after(ctx, prev);
+                                }
+                                last_inserted = Some(const_op_ptr);
+                                let index_value = const_op_ptr.deref(ctx).get_result(0);
+
+                                let elem_ptr_ty = dialect_mir::types::MirPtrType::get_generic(
+                                    ctx,
+                                    element_ty,
+                                    is_mutable,
+                                );
+                                let elem_addr_op = Operation::new(
+                                    ctx,
+                                    MirArrayElementAddrOp::get_concrete_op_info(),
+                                    vec![elem_ptr_ty.into()],
+                                    vec![result_val, index_value],
+                                    vec![],
+                                    0,
+                                );
+                                elem_addr_op.deref_mut(ctx).set_loc(loc.clone());
+                                if let Some(prev) = last_inserted {
+                                    elem_addr_op.insert_after(ctx, prev);
+                                }
+                                last_inserted = Some(elem_addr_op);
+                                result_val = elem_addr_op.deref(ctx).get_result(0);
+                            }
                             _ => {
-                                // ConstantIndex, Downcast, Subslice are not yet
-                                // handled in the &(*ptr).field... chain; fall out
-                                // and let the caller see the partially-walked
-                                // pointer. (Pre-Index fix this also dropped Index,
-                                // which silently corrupted reads — see the Index
-                                // arm above for the surfaced case.)
+                                // Downcast, Subslice are not yet handled in the
+                                // &(*ptr).field... chain; fall out and let the
+                                // caller see the partially-walked pointer.
                                 break;
                             }
                         }
@@ -1186,6 +1291,103 @@ pub fn translate_rvalue(
                                 );
 
                                 use dialect_mir::ops::MirArrayElementAddrOp;
+                                let elem_addr_op = Operation::new(
+                                    ctx,
+                                    MirArrayElementAddrOp::get_concrete_op_info(),
+                                    vec![elem_ptr_ty.into()],
+                                    vec![result_val, index_value],
+                                    vec![],
+                                    0,
+                                );
+                                elem_addr_op.deref_mut(ctx).set_loc(loc.clone());
+                                if let Some(prev) = last_inserted {
+                                    elem_addr_op.insert_after(ctx, prev);
+                                }
+                                last_inserted = Some(elem_addr_op);
+                                result_val = elem_addr_op.deref(ctx).get_result(0);
+                            }
+                            mir::ProjectionElem::ConstantIndex {
+                                offset,
+                                min_length: _,
+                                from_end,
+                            } => {
+                                // Raw-pointer sibling of the &-ref ConstantIndex
+                                // arm at the other site. Same Place shape
+                                // [Deref, Field, ConstantIndex] surfaces
+                                // whenever `&raw {const,mut} (*ptr).field[N]`
+                                // is taken with a compile-time index.
+                                if *from_end {
+                                    return input_err!(
+                                        loc.clone(),
+                                        TranslationErr::unsupported(
+                                            "ConstantIndex with from_end=true after Deref+Field not yet supported"
+                                        )
+                                    );
+                                }
+                                let const_idx = *offset as usize;
+
+                                let cur_ty = result_val.get_type(ctx);
+                                let element_ty = {
+                                    let cur_ty_ref = cur_ty.deref(ctx);
+                                    let ptr_ty = match cur_ty_ref
+                                        .downcast_ref::<dialect_mir::types::MirPtrType>()
+                                    {
+                                        Some(p) => p,
+                                        None => {
+                                            return input_err!(
+                                                loc.clone(),
+                                                TranslationErr::unsupported(format!(
+                                                    "ConstantIndex projection after Field expected pointer, got {}",
+                                                    cur_ty.disp(ctx)
+                                                ))
+                                            );
+                                        }
+                                    };
+                                    let pointee = ptr_ty.pointee;
+                                    let pointee_ref = pointee.deref(ctx);
+                                    match pointee_ref
+                                        .downcast_ref::<dialect_mir::types::MirArrayType>()
+                                    {
+                                        Some(arr_ty) => arr_ty.element_type(),
+                                        None => {
+                                            return input_err!(
+                                                loc.clone(),
+                                                TranslationErr::unsupported(format!(
+                                                    "ConstantIndex projection after Field expected pointer-to-array, got pointer-to {}",
+                                                    pointee.disp(ctx)
+                                                ))
+                                            );
+                                        }
+                                    }
+                                };
+
+                                use dialect_mir::ops::{MirArrayElementAddrOp, MirConstantOp};
+                                use pliron::builtin::attributes::IntegerAttr;
+                                let i64_ty = IntegerType::get(ctx, 64, Signedness::Signed);
+                                let index_apint =
+                                    APInt::from_i64(const_idx as i64, NonZeroUsize::new(64).unwrap());
+                                let index_attr = IntegerAttr::new(i64_ty, index_apint);
+                                let const_op_ptr = Operation::new(
+                                    ctx,
+                                    MirConstantOp::get_concrete_op_info(),
+                                    vec![i64_ty.into()],
+                                    vec![],
+                                    vec![],
+                                    0,
+                                );
+                                const_op_ptr.deref_mut(ctx).set_loc(loc.clone());
+                                MirConstantOp::new(const_op_ptr).set_attr_value(ctx, index_attr);
+                                if let Some(prev) = last_inserted {
+                                    const_op_ptr.insert_after(ctx, prev);
+                                }
+                                last_inserted = Some(const_op_ptr);
+                                let index_value = const_op_ptr.deref(ctx).get_result(0);
+
+                                let elem_ptr_ty = dialect_mir::types::MirPtrType::get_generic(
+                                    ctx,
+                                    element_ty,
+                                    is_mutable,
+                                );
                                 let elem_addr_op = Operation::new(
                                     ctx,
                                     MirArrayElementAddrOp::get_concrete_op_info(),

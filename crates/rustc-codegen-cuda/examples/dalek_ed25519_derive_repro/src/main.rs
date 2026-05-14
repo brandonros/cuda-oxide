@@ -27,8 +27,14 @@
 //! `cargo oxide build` succeeds. `cargo oxide run` produces a derived
 //! public key that does not match the KAT.
 //!
-//! No fix yet — documents cross-crate monomorphization bug in
-//! curve25519_dalek's Scalar / Edwards entry points.
+//! ## Fix
+//!
+//! Flipped together with L3 (`dalek_edwards_mul_base_one_repro`) by the
+//! `[Deref, Field, ConstantIndex]` projection-lowering fix in
+//! `crates/mir-importer/src/translator/rvalue.rs`. See that example's
+//! doc-block for the full root cause — same broken
+//! `FieldElement51::conditional_assign` underneath, just exercised by the
+//! full ed25519 derive instead of a single basepoint scalar multiply.
 //!
 //! ## Build with
 //!

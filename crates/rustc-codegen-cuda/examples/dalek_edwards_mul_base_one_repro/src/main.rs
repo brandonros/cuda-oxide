@@ -20,8 +20,34 @@
 //! bytes that disagree with the basepoint
 //! `5866666666666666666666666666666666666666666666666666666666666666`.
 //!
-//! No fix yet — documents cross-crate monomorphization bug in
-//! curve25519_dalek's Scalar / Edwards entry points.
+//! ## Root cause
+//!
+//! Same bug class as DALEK-1 L0 (`dalek_from_canonical_bytes_zero_repro`)
+//! but with `ProjectionElem::ConstantIndex` instead of `Index`. After the
+//! unroller / inliner converts `for i in 0..5 { self.0[i] ^= ... }` inside
+//! `FieldElement51::conditional_assign` to five distinct
+//! `self.0[N] ^= ...` statements with compile-time `N`, the MIR Place for
+//! the `&mut self.0[N]` reference has projection chain
+//! `[Deref, Field(0), ConstantIndex { offset: N }]`. The
+//! projection-walking loops in rvalue.rs's `Rvalue::Ref` / `Rvalue::RawPtr`
+//! handlers caught `Index` (from the prior fix) but still let
+//! `ConstantIndex` fall through `_ => break`, so every iteration of the
+//! unrolled loop wrote into `self.0[0]` instead of `self.0[N]`.
+//!
+//! Inside `EdwardsBasepointTable::mul_base`, `LookupTable::select` uses
+//! `AffineNielsPoint::conditional_assign` → three
+//! `FieldElement51::conditional_assign` calls (one per coordinate
+//! component). With limbs `[1..5]` never copied from the lookup table
+//! entry, the resulting point had a corrupted `y` whose only valid limb
+//! was `limb[0]`; `compress()` then packed that into the
+//! `66 66 66 66 66 66 06 00 00 ... 00 80` byte pattern observed on device.
+//!
+//! ## Fix
+//!
+//! Added a `ConstantIndex` arm next to the `Index` arm in both
+//! projection-walk loops in `crates/mir-importer/src/translator/rvalue.rs`.
+//! Materialises the constant offset as a `MirConstantOp` (i64) and feeds
+//! it into a `MirArrayElementAddrOp` exactly like the runtime-index path.
 //!
 //! ## Build with
 //!
