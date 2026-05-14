@@ -202,16 +202,22 @@ Each repro is a "ladder rung" — same bug at a different altitude. A
 fix that flips a ladder leaf (L0) should propagate to every rung
 above it; rungs that don't flip indicate a second, distinct bug.
 
-**K256-1 ladder** — sec1 encoding / `EncodedPoint::from_affine_coordinates`:
+**K256-1 ladder** — sec1 encoding / `EncodedPoint::from_affine_coordinates`.
+**Entire ladder L0–L4 fixed** by the `#[repr(u8)]` explicit-discriminant
+fix in `convert_construct_enum`: `MirConstructEnumOp` was writing the
+declaration-order *variant index* into the discriminant slot instead of
+the explicit `#[repr]` value, so `sec1::Tag::CompressedEvenY` (declared
+second, explicit value `2`) was constructed with byte `1`, which then
+made `Tag::from_u8` return `Err` and `.expect()` panic the kernel.
 
-| Rung | Repro example                                  | Self-test slot | What it isolates |
-|------|------------------------------------------------|---------------:|------------------|
-| L0   | `k256_encoded_point_from_affine_coords_repro`  | 96  | EncodedPoint constructor with raw FieldBytes |
-| L1   | `k256_affine_generator_to_encoded_repro`       | 93  | + AffinePoint is_identity / Choice path |
-| L2   | `k256_projective_generator_to_encoded_repro`   | 78  | + projective→affine (trivial z=1 inv) |
-| L3   | `k256_secret_key_derive_one_repro`             | 74  | + SecretKey::from_bytes → public_key() |
-| L4   | `k256_uncompressed_pubkey_derive_repro`        | 5   | full uncompressed derive (eth pipeline upstream) |
-| twin | `k256_encoded_point_replica_repro`             | 100 | passing baseline: hand-rolled `[u8; 33]` assembly, no k256 |
+| Rung | Repro example                                  | Self-test slot | What it isolates | Status |
+|------|------------------------------------------------|---------------:|------------------|--------|
+| L0   | `k256_encoded_point_from_affine_coords_repro`  | 96  | EncodedPoint constructor with raw FieldBytes | **PASS** (enum-discriminant fix) |
+| L1   | `k256_affine_generator_to_encoded_repro`       | 93  | + AffinePoint is_identity / Choice path | **PASS** (same fix) |
+| L2   | `k256_projective_generator_to_encoded_repro`   | 78  | + projective→affine (trivial z=1 inv) | **PASS** (same fix) |
+| L3   | `k256_secret_key_derive_one_repro`             | 74  | + SecretKey::from_bytes → public_key() | **PASS** (same fix) |
+| L4   | `k256_uncompressed_pubkey_derive_repro`        | 5   | full uncompressed derive (eth pipeline upstream) | **PASS** (same fix) |
+| twin | `k256_encoded_point_replica_repro`             | 100 | passing baseline: hand-rolled `[u8; 33]` assembly, no k256 | PASS |
 
 **DALEK-1 ladder** — `Scalar` byte entry points / `mul_base`. **L0–L2
 fixed** by the `[Deref, Field, Index]` projection-lowering fix in

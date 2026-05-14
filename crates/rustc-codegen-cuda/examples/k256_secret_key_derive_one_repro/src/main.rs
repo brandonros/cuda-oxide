@@ -22,8 +22,11 @@
 //! downstream of `from_bytes`. Slots 78 / 93 / 96 (the encoding
 //! chain) FAIL — fixing them should flip this example too.
 //!
-//! No fix yet — documents cross-crate monomorphization bug in k256's
-//! sec1 encoding path.
+//! ## Fix
+//!
+//! See `k256_encoded_point_from_affine_coords_repro` (K256-1 L0) for the
+//! full root cause. The downstream `to_encoded_point` chain bottoms out in
+//! the same broken `MirConstructEnumOp` lowering for `sec1::Tag`.
 //!
 //! ## Build with
 //!

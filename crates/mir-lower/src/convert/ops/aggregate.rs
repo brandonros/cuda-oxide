@@ -552,8 +552,9 @@ pub(crate) fn convert_construct_enum(
         (result_ty, operands, variant_index)
     };
 
-    let (discriminant_ty, variant_field_counts, all_field_types): (
+    let (discriminant_ty, variant_discriminants, variant_field_counts, all_field_types): (
         Ptr<TypeObj>,
+        Vec<u64>,
         Vec<u32>,
         Vec<Ptr<TypeObj>>,
     ) = {
@@ -561,6 +562,7 @@ pub(crate) fn convert_construct_enum(
         match ty_ref.downcast_ref::<MirEnumType>() {
             Some(e) => (
                 e.discriminant_ty,
+                e.variant_discriminants.clone(),
                 e.variant_field_counts.clone(),
                 e.all_field_types.clone(),
             ),
@@ -569,6 +571,19 @@ pub(crate) fn convert_construct_enum(
                     "MirConstructEnumOp result type must be MirEnumType"
                 );
             }
+        }
+    };
+
+    // Explicit `#[repr(...)]` value, not the declaration-order index. See
+    // `MirEnumType::variant_discriminants` doc-comment for the bug class this
+    // guards against.
+    let discriminant_value = match variant_discriminants.get(variant_index) {
+        Some(d) => *d,
+        None => {
+            return pliron::input_err_noloc!(
+                "MirConstructEnumOp variant_index {} out of range for MirEnumType",
+                variant_index
+            );
         }
     };
 
@@ -592,7 +607,7 @@ pub(crate) fn convert_construct_enum(
         .map(|t| t.width())
         .unwrap_or(8);
     let discr_apint = APInt::from_u64(
-        variant_index as u64,
+        discriminant_value,
         NonZeroUsize::new(discr_width as usize).unwrap(),
     );
     let llvm_discr_ty = IntegerType::get(ctx, discr_width, Signedness::Signless);

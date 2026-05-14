@@ -40,6 +40,7 @@ use pliron::context::{Context, Ptr};
 use pliron::r#type::TypeObj;
 use pliron::{input_err_noloc, input_error_noloc};
 use rustc_public::CrateDef;
+use rustc_public_bridge::IndexedVal;
 
 // Re-export types from dialect_mir for convenience
 pub use dialect_mir::types::{
@@ -619,9 +620,16 @@ pub fn translate_type(
                         pliron::builtin::types::Signedness::Unsigned,
                     );
 
-                    // Translate each variant
+                    // Translate each variant. We pull the explicit discriminant
+                    // value from `adt_def.discriminant_for_variant(idx)` so
+                    // `#[repr(u8)] enum Tag { Identity = 0, CompressedEvenY = 2, ... }`
+                    // round-trips correctly through MirConstructEnumOp — using
+                    // the bare declaration-order index here would write `1`
+                    // instead of `2` for CompressedEvenY, and the downstream
+                    // SwitchInt matcher would route every CompressedEvenY value
+                    // into the default arm (sec1's `Tag::from_u8` Err path).
                     let mut enum_variants = Vec::with_capacity(variants.len());
-                    for variant in variants.iter() {
+                    for (idx, variant) in variants.iter().enumerate() {
                         let fields = variant.fields();
                         let mut field_types = Vec::with_capacity(fields.len());
                         for field in fields {
@@ -629,8 +637,13 @@ pub fn translate_type(
                             let translated_ty = translate_type(ctx, &field_ty)?;
                             field_types.push(translated_ty);
                         }
-                        enum_variants
-                            .push(EnumVariant::new(variant.name().to_string(), field_types));
+                        let variant_idx = rustc_public::ty::VariantIdx::to_val(idx);
+                        let discriminant = adt_def.discriminant_for_variant(variant_idx).val as u64;
+                        enum_variants.push(EnumVariant::new(
+                            variant.name().to_string(),
+                            discriminant,
+                            field_types,
+                        ));
                     }
 
                     // Create the enum type

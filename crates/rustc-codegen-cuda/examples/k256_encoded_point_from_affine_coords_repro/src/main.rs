@@ -14,22 +14,31 @@
 //! the well-known SEC1-compressed generator
 //! `02 79BE667E F9DCBBAC 55A06295 CE870B07 029BFCDB 2DCE28D9 59F2815B 16F81798`.
 //!
-//! ## What's suspected
+//! ## Root cause
 //!
-//! Cross-crate monomorphization of `EncodedPoint::from_affine_coordinates`.
-//! The hand-rolled `[u8; 33]` replica with the same coordinate bytes
-//! passes (slot 100), so the algorithm is correct on device. The only
-//! difference is the real-k256-crate codegen path: the function uses
-//! `GenericArray<u8, U32>` (FieldBytes) and writes through
-//! `GenericArray<u8, U33>` for the output. Suspicion: one of those
-//! generic-typed reads/writes is being miscompiled when the function
-//! is instantiated from a `#[kernel]`-rooted call graph.
+//! `convert_construct_enum` in `crates/mir-lower/src/convert/ops/aggregate.rs`
+//! wrote the declaration-order *variant index* into the discriminant slot
+//! when an `#[repr(u8)]` enum was constructed, instead of the variant's
+//! explicit `#[repr]` value. For `sec1::Tag` (declared as
+//! `Identity = 0, CompressedEvenY = 2, CompressedOddY = 3, Uncompressed = 4,
+//! Compact = 5`), the construct path stored byte `1` for `CompressedEvenY`
+//! (its declaration-order index) where the rest of the pipeline expected `2`.
+//! `EncodedPoint::from_affine_coordinates(_, _, true)` therefore wrote tag
+//! byte `0x01` (not a valid SEC1 tag) into byte `0` of the underlying
+//! `GenericArray`; the very next call `encoded.tag()` ran that byte through
+//! `Tag::from_u8`'s `match`, hit the default arm, returned `Err`, and
+//! `.expect()` panicked — terminating the kernel mid-flight.
 //!
-//! Slots 98/99/101/110 (GenericArray basic ops) PASS, and slot 100
-//! (raw `[u8; 33]` replica) PASSES. So the bug is specifically in this
-//! cross-crate function, not in the GenericArray ops themselves.
+//! ## Fix
 //!
-//! No fix yet — documents cross-crate monomorphization bug.
+//! Added `variant_discriminants: Vec<u64>` to `MirEnumType` (parallel to
+//! `variant_names`), populated from `adt_def.discriminant_for_variant(idx)`
+//! in `mir-importer/src/translator/types.rs`, and used in
+//! `convert_construct_enum` in place of `variant_index` when writing the
+//! discriminant slot.
+//!
+//! The hand-rolled `[u8; 33]` replica (slot 100) was the diff target —
+//! it doesn't touch `sec1::Tag`, so its construction path was never broken.
 //!
 //! ## Build with
 //!

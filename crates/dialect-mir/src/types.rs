@@ -520,20 +520,35 @@ impl Verify for MirArrayType {
 pub struct EnumVariant {
     /// Variant name (e.g., "Some", "None", "Ok", "Err")
     pub name: String,
+    /// The variant's explicit discriminant value (the byte/word actually
+    /// stored in the discriminant slot when an instance is constructed).
+    /// For `#[repr(u8)] enum Tag { Identity = 0, CompressedEvenY = 2, ... }`
+    /// the explicit value `2` for CompressedEvenY differs from the variant's
+    /// declaration-order index (`1`); only the explicit value matches what
+    /// the rest of the codegen pipeline (SwitchInt cases, GetDiscriminant)
+    /// expects to see. u64 fits all stable Rust enum reprs (≤u64);
+    /// signed-discriminant enums round-trip via two's complement.
+    pub discriminant: u64,
     /// Field types for this variant (empty for unit variants like None)
     pub field_types: Vec<Ptr<TypeObj>>,
 }
 
 impl EnumVariant {
-    /// Create a new enum variant.
-    pub fn new(name: String, field_types: Vec<Ptr<TypeObj>>) -> Self {
-        EnumVariant { name, field_types }
+    /// Create a new enum variant. `discriminant` is the explicit value from
+    /// rustc's `discriminant_for_variant`, not the declaration-order index.
+    pub fn new(name: String, discriminant: u64, field_types: Vec<Ptr<TypeObj>>) -> Self {
+        EnumVariant {
+            name,
+            discriminant,
+            field_types,
+        }
     }
 
     /// Create a unit variant (no fields).
-    pub fn unit(name: String) -> Self {
+    pub fn unit(name: String, discriminant: u64) -> Self {
         EnumVariant {
             name,
+            discriminant,
             field_types: vec![],
         }
     }
@@ -555,7 +570,7 @@ impl EnumVariant {
 /// * Discriminant type must be an integer type.
 #[pliron_type(
     name = "mir.enum",
-    format = "`<` $name `,` $discriminant_ty `,` `[` vec($variant_names, CharSpace(`,`)) `]` `,` `[` vec($variant_field_counts, CharSpace(`,`)) `]` `,` `[` vec($all_field_types, CharSpace(`,`)) `]` `>`"
+    format = "`<` $name `,` $discriminant_ty `,` `[` vec($variant_names, CharSpace(`,`)) `]` `,` `[` vec($variant_discriminants, CharSpace(`,`)) `]` `,` `[` vec($variant_field_counts, CharSpace(`,`)) `]` `,` `[` vec($all_field_types, CharSpace(`,`)) `]` `>`"
 )]
 #[derive(Hash, PartialEq, Eq, Debug, Clone)]
 pub struct MirEnumType {
@@ -565,6 +580,14 @@ pub struct MirEnumType {
     pub discriminant_ty: Ptr<TypeObj>,
     /// Variant names in order
     pub variant_names: Vec<String>,
+    /// Explicit discriminant value for each variant (parallel to
+    /// `variant_names`). For `#[repr(u8)] enum Tag { A = 0, B = 2 }` this
+    /// holds `[0, 2]` while `variant_names` declaration-order is `[A, B]`.
+    /// Construct paths must write `variant_discriminants[idx]` into the
+    /// discriminant slot — writing the bare `idx` is wrong for any enum
+    /// with non-contiguous `#[repr(...)]` values and surfaces as a
+    /// `tag()`-style panic downstream of the enum's `SwitchInt` matcher.
+    pub variant_discriminants: Vec<u64>,
     /// Number of fields for each variant (parallel to variant_names)
     pub variant_field_counts: Vec<u32>,
     /// All field types concatenated (use variant_field_counts to split)
@@ -581,11 +604,13 @@ impl MirEnumType {
     ) -> TypePtr<Self> {
         // Flatten variants into parallel vectors
         let mut variant_names = Vec::with_capacity(variants.len());
+        let mut variant_discriminants = Vec::with_capacity(variants.len());
         let mut variant_field_counts = Vec::with_capacity(variants.len());
         let mut all_field_types = Vec::new();
 
         for v in variants {
             variant_names.push(v.name);
+            variant_discriminants.push(v.discriminant);
             variant_field_counts.push(v.field_types.len() as u32);
             all_field_types.extend(v.field_types);
         }
@@ -595,6 +620,7 @@ impl MirEnumType {
                 name,
                 discriminant_ty,
                 variant_names,
+                variant_discriminants,
                 variant_field_counts,
                 all_field_types,
             },
@@ -633,6 +659,7 @@ impl MirEnumType {
 
         Some(EnumVariant {
             name: self.variant_names[index].clone(),
+            discriminant: self.variant_discriminants[index],
             field_types,
         })
     }

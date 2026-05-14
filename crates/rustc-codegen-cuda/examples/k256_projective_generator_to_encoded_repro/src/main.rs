@@ -14,8 +14,12 @@
 //! `cargo oxide build` succeeds. `cargo oxide run` returns wrong 33
 //! bytes — differs from the SEC1-compressed secp256k1 generator.
 //!
-//! No fix yet — documents cross-crate monomorphization bug in k256's
-//! sec1 encoding path.
+//! ## Fix
+//!
+//! See `k256_encoded_point_from_affine_coords_repro` (K256-1 L0) for the
+//! full root cause. Same `MirConstructEnumOp` bug — `sec1::Tag`'s
+//! `#[repr(u8)]` explicit discriminants (`CompressedEvenY = 2`, etc.) were
+//! being overwritten with declaration-order indices.
 //!
 //! ## Build with
 //!

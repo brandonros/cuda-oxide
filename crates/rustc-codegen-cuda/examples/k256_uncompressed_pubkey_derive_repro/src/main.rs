@@ -21,8 +21,12 @@
 //! example should also flip — they share `SecretKey::from_bytes` and
 //! the `to_encoded_point` chain, differing only in the compress flag.
 //!
-//! No fix yet — documents cross-crate monomorphization bug in k256's
-//! sec1 encoding path.
+//! ## Fix
+//!
+//! See `k256_encoded_point_from_affine_coords_repro` (K256-1 L0) for the
+//! full root cause. The `MirConstructEnumOp` discriminant fix flipped this
+//! prediction true — same chain, just with `compress = false`
+//! (`Tag::Uncompressed`, explicit value `4`, declaration index `3`).
 //!
 //! ## Build with
 //!
