@@ -183,8 +183,85 @@ compute-sanitizer, returns wrong answers, or exhibits UB-driven
 miscompilation that only the hardware exposes. Verification of a fix
 requires a hardware run; text inspection alone is insufficient.
 
-(None currently. `static_ref_relocation` and `xoshiro_seed_misalign`
-were here pre-fix and have moved to the passing list.)
+### Cross-crate monomorphization cluster (DALEK-1 / K256-1)
+
+Surfaced from `vanity-miner-rs` self_test on real GPU hardware. Self-
+test slots 2/4/5/11–20 and 71/72/74/75/78/79/93/96/102/103/109/112
+all FAIL despite the algorithmic body being independently verified
+correct in-tree (slots 70/73/76/77/80/84–90/94/95/98–101/110/113–117
+PASS — the same algorithms ported into the test crate work, but
+calling them through real `k256` / `curve25519-dalek` does not).
+
+The hypothesis: when these crates are monomorphized from a `#[kernel]`-
+rooted call graph, generic instantiation through `GenericArray` /
+`subtle::Choice` / `CtOption` produces different codegen than the
+same source compiled in-tree. The fix is unknown — see the doc-block
+on each repro for the local hypothesis.
+
+Each repro is a "ladder rung" — same bug at a different altitude. A
+fix that flips a ladder leaf (L0) should propagate to every rung
+above it; rungs that don't flip indicate a second, distinct bug.
+
+**K256-1 ladder** — sec1 encoding / `EncodedPoint::from_affine_coordinates`:
+
+| Rung | Repro example                                  | Self-test slot | What it isolates |
+|------|------------------------------------------------|---------------:|------------------|
+| L0   | `k256_encoded_point_from_affine_coords_repro`  | 96  | EncodedPoint constructor with raw FieldBytes |
+| L1   | `k256_affine_generator_to_encoded_repro`       | 93  | + AffinePoint is_identity / Choice path |
+| L2   | `k256_projective_generator_to_encoded_repro`   | 78  | + projective→affine (trivial z=1 inv) |
+| L3   | `k256_secret_key_derive_one_repro`             | 74  | + SecretKey::from_bytes → public_key() |
+| L4   | `k256_uncompressed_pubkey_derive_repro`        | 5   | full uncompressed derive (eth pipeline upstream) |
+| twin | `k256_encoded_point_replica_repro`             | 100 | passing baseline: hand-rolled `[u8; 33]` assembly, no k256 |
+
+**DALEK-1 ladder** — `Scalar` byte entry points / `mul_base`:
+
+| Rung | Repro example                                  | Self-test slot | What it isolates |
+|------|------------------------------------------------|---------------:|------------------|
+| L0   | `dalek_from_canonical_bytes_zero_repro`        | 112 | no reduce(): just validate + wrap + PartialEq |
+| L1   | `dalek_from_bytes_mod_order_zero_repro`        | 102 | + reduce() on zero input |
+| L2   | `dalek_from_bytes_mod_order_nonzero_repro`     | 71  | + reduce() on non-zero input |
+| L3   | `dalek_edwards_mul_base_one_repro`             | 72  | + EdwardsPoint::mul_base + compress() |
+| L4   | `dalek_ed25519_derive_repro`                   | 2   | full ed25519 derive (solana pipeline upstream) |
+| twin | `dalek_scalar52_reduce_pipeline_zero_repro`    | 117 | passing baseline: verbatim Scalar52 reduce port, no dalek |
+
+Pipeline slots [11]/[12] (solana) and [13]–[20] (ethereum / bitcoin)
+are integration-only downstream of the L4 rungs — they have no
+dedicated repro here. If an L4 flips but a downstream pipeline slot
+doesn't, that mismatch surfaces a second bug.
+
+### Passing-twin PTX diff workflow
+
+Each L0 has a **passing twin** that does the same logical computation
+without crossing into the broken external crate. The twin's PTX is the
+diff baseline:
+
+```sh
+# K256 — diff the `check` bodies
+diff -u \
+  <(awk '/Begin function .*__check/,/End function/' \
+      k256_encoded_point_from_affine_coords_repro/*.ptx) \
+  <(awk '/Begin function .*__check/,/End function/' \
+      k256_encoded_point_replica_repro/*.ptx)
+```
+
+Note: the `check` body itself is mostly stack-staging and call setup
+— the bug surface lives in the function the failing twin calls into,
+not in `check`. For K256 inspect the failing twin's
+`from_affine_coordinates` body (lines ~489–854 in the `.ptx`, ~366
+lines) directly; the passing twin's `check` body (~160 lines, all
+inlined) is the gold-standard computation to compare against. For
+DALEK the same applies to `from_canonical_bytes` and the Scalar
+operations it calls.
+
+The diff is most useful for spotting **structural** red flags (excess
+local-stack allocation, unexpected register pressure, missing
+operations) rather than the precise wrong instruction. Hardware
+runtime data — what byte differs and where — is still needed to
+pinpoint the miscompile.
+
+(Pre-cluster examples: `static_ref_relocation` and
+`xoshiro_seed_misalign` were here pre-fix and have moved to the
+passing list.)
 
 ## Passing regression tests
 

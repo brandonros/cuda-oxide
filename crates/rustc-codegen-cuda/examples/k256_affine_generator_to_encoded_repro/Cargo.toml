@@ -1,0 +1,31 @@
+[package]
+name = "k256_affine_generator_to_encoded_repro"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[workspace]
+
+# Runtime known-failure repro for `k256::AffinePoint::GENERATOR
+# .to_encoded_point(true)` producing wrong bytes on device.
+#
+# Mirrors vanity-miner-rs self_test slot 93. One altitude up from slot 96
+# (`EncodedPoint::from_affine_coordinates`) — `AffinePoint::to_encoded_
+# point` internally branches on `is_identity` via `subtle::Choice`
+# (slots 94/95 PASS) before calling `EncodedPoint::from_affine_coordinates`
+# on the field bytes. If this FAILs but slot 96 also FAILs, the bug is
+# downstream in EncodedPoint construction. If 96 PASSes and 93 FAILs,
+# the bug is in `to_encoded_point`'s identity-check / select arm.
+#
+# Build with:
+#   cargo oxide build k256_affine_generator_to_encoded_repro
+#
+# No fix yet — documents cross-crate monomorphization bug in k256's
+# sec1 encoding path.
+
+[dependencies]
+k256 = { version = "0.13.4", default-features = false, features = ["alloc", "arithmetic", "precomputed-tables", "critical-section"] }
+
+cuda-device = { path = "../../../cuda-device" }
+cuda-host = { path = "../../../cuda-host" }
+cuda-core = { path = "../../../cuda-core" }

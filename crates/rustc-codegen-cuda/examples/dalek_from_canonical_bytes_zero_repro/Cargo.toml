@@ -1,0 +1,35 @@
+[package]
+name = "dalek_from_canonical_bytes_zero_repro"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[workspace]
+
+# Runtime known-failure repro for `curve25519_dalek::Scalar::
+# from_canonical_bytes([0u8; 32]).unwrap() == Scalar::ZERO` failing on
+# device.
+#
+# Mirrors vanity-miner-rs self_test slot 112. Smallest leaf of the
+# DALEK-1 cluster — `from_canonical_bytes` does NOT call `reduce()`,
+# it just validates `bytes < ℓ` and wraps. For [0; 32], 0 < ℓ so it
+# returns `CtOption::Some(Scalar { bytes: [0; 32] })`. Then
+# `s == Scalar::ZERO` via dalek's PartialEq impl.
+#
+# Passing baselines: slots 113–117 (verbatim Scalar52 / reduce-pipeline
+# ports inside vanity-miner-rs's test crate) all PASS on the same
+# all-zero input. The failing crossover is specifically the real
+# curve25519_dalek crate's public API.
+#
+# Build with:
+#   cargo oxide build dalek_from_canonical_bytes_zero_repro
+#
+# No fix yet — documents cross-crate monomorphization bug in
+# curve25519_dalek's Scalar entry points.
+
+[dependencies]
+curve25519-dalek = { version = "4.1.3", default-features = false, features = ["alloc", "precomputed-tables"] }
+
+cuda-device = { path = "../../../cuda-device" }
+cuda-host = { path = "../../../cuda-host" }
+cuda-core = { path = "../../../cuda-core" }

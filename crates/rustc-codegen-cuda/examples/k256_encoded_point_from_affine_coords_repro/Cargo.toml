@@ -1,0 +1,31 @@
+[package]
+name = "k256_encoded_point_from_affine_coords_repro"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[workspace]
+
+# Runtime known-failure repro for `k256::EncodedPoint::from_affine_
+# coordinates(GX, GY, true)` producing wrong bytes on device.
+#
+# Mirrors vanity-miner-rs self_test slot 96. Smallest leaf of the K256-1
+# cluster — directly calls `EncodedPoint::from_affine_coordinates` with
+# the hardcoded secp256k1 generator x/y. A hand-rolled `[u8; 33]`
+# replica with the same coordinates passes (vanity-miner-rs slot 100),
+# ruling out the algorithm; the difference is in how real k256's
+# `EncodedPoint` constructor is codegen'd when monomorphized into a
+# `#[kernel]`-rooted call graph.
+#
+# Build with:
+#   cargo oxide build k256_encoded_point_from_affine_coords_repro
+#
+# No fix yet — documents cross-crate monomorphization bug in k256's
+# sec1 encoding path.
+
+[dependencies]
+k256 = { version = "0.13.4", default-features = false, features = ["alloc", "arithmetic", "precomputed-tables", "critical-section"] }
+
+cuda-device = { path = "../../../cuda-device" }
+cuda-host = { path = "../../../cuda-host" }
+cuda-core = { path = "../../../cuda-core" }

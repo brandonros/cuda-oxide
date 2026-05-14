@@ -1,0 +1,33 @@
+[package]
+name = "dalek_ed25519_derive_repro"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[workspace]
+
+# Runtime known-failure repro for the full ed25519 public-key derivation
+# pipeline (clamp → from_bytes_mod_order → mul_base → compress) failing
+# against a known KAT on device.
+#
+# Mirrors vanity-miner-rs self_test slot 2 (and the upstream of every
+# solana-pipeline slot 11/12). This is the full
+# `ed25519_derive_public_key` (see vanity-miner-rs/logic/src/ed25519.rs)
+# applied to a fixed hashed-private test vector with a well-known
+# expected public key.
+#
+# If both 71 (from_bytes_mod_order round-trip) and 72 (mul_base) flip
+# to pass, this example should also flip — it's their composition.
+#
+# Build with:
+#   cargo oxide build dalek_ed25519_derive_repro
+#
+# No fix yet — documents cross-crate monomorphization bug in
+# curve25519_dalek's Scalar / Edwards entry points.
+
+[dependencies]
+curve25519-dalek = { version = "4.1.3", default-features = false, features = ["alloc", "precomputed-tables"] }
+
+cuda-device = { path = "../../../cuda-device" }
+cuda-host = { path = "../../../cuda-host" }
+cuda-core = { path = "../../../cuda-core" }

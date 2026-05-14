@@ -1,0 +1,41 @@
+[package]
+name = "dalek_scalar52_reduce_pipeline_zero_repro"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[workspace]
+
+# PASSING-TWIN repro: full `Scalar::reduce()` pipeline composed in
+# THIS crate on all-zero input, using a verbatim byte-for-byte port of
+# `curve25519_dalek::backend::serial::u64::scalar` (Scalar52 + L + R +
+# from_bytes + mul_internal + montgomery_reduce + sub + as_bytes).
+#
+# Mirrors vanity-miner-rs self_test slot 117 (and slots 113-116 in
+# spirit). Per the data this PASSes on real hardware despite running
+# byte-identical code to what dalek's own `reduce()` body runs — that
+# asymmetry is the smoking gun for the cross-crate-monomorphization
+# bug behind `dalek_from_canonical_bytes_zero_repro` (slot 112) and
+# every other Bug-71 surface.
+#
+# Purpose: passing baseline whose PTX can be diffed against
+# `dalek_from_canonical_bytes_zero_repro` to localize the
+# cross-crate-only miscompile.
+#
+# Build with:
+#   cargo run -p cargo-oxide -- build dalek_scalar52_reduce_pipeline_zero_repro
+#
+# PTX diff workflow:
+#   diff -u \
+#     <(awk '/Begin function .*__check/,/End function .*__check/' \
+#         dalek_from_canonical_bytes_zero_repro/*.ptx) \
+#     <(awk '/Begin function .*__check/,/End function .*__check/' \
+#         dalek_scalar52_reduce_pipeline_zero_repro/*.ptx)
+#
+# This example has NO dependency on `curve25519-dalek` — that's the
+# point.
+
+[dependencies]
+cuda-device = { path = "../../../cuda-device" }
+cuda-host = { path = "../../../cuda-host" }
+cuda-core = { path = "../../../cuda-core" }

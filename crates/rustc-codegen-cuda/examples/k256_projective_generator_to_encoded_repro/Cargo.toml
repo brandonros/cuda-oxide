@@ -1,0 +1,30 @@
+[package]
+name = "k256_projective_generator_to_encoded_repro"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[workspace]
+
+# Runtime known-failure repro for `k256::ProjectivePoint::GENERATOR
+# .to_affine().to_encoded_point(true)` producing wrong bytes on device.
+#
+# Mirrors vanity-miner-rs self_test slot 78. Encodes the secp256k1
+# generator point with NO scalar multiplication and NO scalar-mult
+# precomputed-table touch (`ProjectivePoint::GENERATOR` has z=1, so
+# `to_affine()`'s field inversion is trivial). This rules out scalar
+# mult and the `Lazy<[LookupTable; 33]>` first-access path as suspects:
+# the bug must be in the projective→affine + to_encoded_point chain.
+#
+# Build with:
+#   cargo oxide build k256_projective_generator_to_encoded_repro
+#
+# No fix yet — documents cross-crate monomorphization bug in k256's
+# sec1 encoding path.
+
+[dependencies]
+k256 = { version = "0.13.4", default-features = false, features = ["alloc", "arithmetic", "precomputed-tables", "critical-section"] }
+
+cuda-device = { path = "../../../cuda-device" }
+cuda-host = { path = "../../../cuda-host" }
+cuda-core = { path = "../../../cuda-core" }

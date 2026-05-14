@@ -1,0 +1,30 @@
+[package]
+name = "k256_uncompressed_pubkey_derive_repro"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[workspace]
+
+# Runtime known-failure repro for the full k256 uncompressed public-key
+# derivation `SecretKey::from_bytes(scalar=1).public_key()
+# .to_encoded_point(false)` producing wrong 65-byte output on device.
+#
+# Mirrors vanity-miner-rs self_test slot 5 (and the upstream of every
+# ethereum slot 13/14/15). Same path as the compressed derive (slot 74
+# / k256_secret_key_derive_one_repro), differing only in the
+# `to_encoded_point(false)` flag → 65 bytes (0x04 || GX || GY) instead
+# of 33 bytes.
+#
+# Build with:
+#   cargo oxide build k256_uncompressed_pubkey_derive_repro
+#
+# No fix yet — documents cross-crate monomorphization bug in k256's
+# sec1 encoding path.
+
+[dependencies]
+k256 = { version = "0.13.4", default-features = false, features = ["alloc", "arithmetic", "precomputed-tables", "critical-section"] }
+
+cuda-device = { path = "../../../cuda-device" }
+cuda-host = { path = "../../../cuda-host" }
+cuda-core = { path = "../../../cuda-core" }

@@ -1,0 +1,32 @@
+[package]
+name = "k256_secret_key_derive_one_repro"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[workspace]
+
+# Runtime known-failure repro for the full k256 public-key derivation
+# `SecretKey::from_bytes(scalar=1).public_key().to_encoded_point(true)`
+# producing wrong bytes on device.
+#
+# Mirrors vanity-miner-rs self_test slot 74. This is the full path
+# vanity-miner-rs's `secp256k1_derive_public_key` (logic/src/secp256k1.rs)
+# takes. With scalar=1 the result is the well-known SEC1-compressed
+# secp256k1 generator G — no test-vector lookup required.
+#
+# Slot 73 (`SecretKey::from_bytes` alone) PASSES, so this exercises
+# `public_key()` + `to_encoded_point` on top.
+#
+# Build with:
+#   cargo oxide build k256_secret_key_derive_one_repro
+#
+# No fix yet — documents cross-crate monomorphization bug in k256's
+# sec1 encoding path.
+
+[dependencies]
+k256 = { version = "0.13.4", default-features = false, features = ["alloc", "arithmetic", "precomputed-tables", "critical-section"] }
+
+cuda-device = { path = "../../../cuda-device" }
+cuda-host = { path = "../../../cuda-host" }
+cuda-core = { path = "../../../cuda-core" }
